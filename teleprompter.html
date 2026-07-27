@@ -165,6 +165,7 @@
     <div class="brand"><span class="dot"></span><h1>Prompter</h1><span>script + camera, one tap</span></div>
 
     <label class="field-label" for="scriptInput">Script</label>
+    <div id="scriptStatus" style="font-size:12.5px; color:var(--ink-dim); margin:-2px 0 8px;">Looking for script.txt…</div>
     <textarea id="scriptInput" placeholder="Paste or write your script here..."></textarea>
 
     <label class="field-label">Pacing mode</label>
@@ -271,12 +272,35 @@
   }
 
   // ---------- Setup screen wiring ----------
-  scriptInput.value = localStorage.getItem("prompter.script") || "";
-  startBtn.disabled = scriptInput.value.trim().length === 0;
+  const scriptStatus = $("scriptStatus");
+
   scriptInput.addEventListener("input", () => {
     localStorage.setItem("prompter.script", scriptInput.value);
     startBtn.disabled = scriptInput.value.trim().length === 0;
+    scriptStatus.textContent = "Edited manually";
   });
+
+  async function loadScriptFile(){
+    try {
+      // cache-bust so a fresh script.txt push isn't served stale on reload
+      const res = await fetch("script.txt?t=" + Date.now(), { cache: "no-store" });
+      if (!res.ok) throw new Error("not found");
+      const text = await res.text();
+      scriptInput.value = text;
+      localStorage.setItem("prompter.script", text);
+      scriptStatus.textContent = "Loaded from script.txt";
+    } catch (err) {
+      // No script.txt (or running from a file:// URL, where fetch of local
+      // files is blocked) -- fall back to whatever was pasted last time.
+      const cached = localStorage.getItem("prompter.script") || "";
+      scriptInput.value = cached;
+      scriptStatus.textContent = cached
+        ? "Couldn't load script.txt — showing your last script"
+        : "No script.txt found — paste your script below";
+    }
+    startBtn.disabled = scriptInput.value.trim().length === 0;
+  }
+  loadScriptFile();
 
   const modeVoiceBtn = $("modeVoiceBtn"), modeManualBtn = $("modeManualBtn");
   modeVoiceBtn.addEventListener("click", () => setMode("voice"));
