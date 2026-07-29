@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -19,7 +18,7 @@
     --bg: #0B0D10;
     --panel: #14171C;
     --ink: #F5F5F0;
-    --ink-dim: #9AA0A8;
+    --ink-dim: #CED1D4;
     --amber: #E8A33D;
     --red: #E5484D;
     --line: #262B33;
@@ -84,10 +83,10 @@
   /* ---------- Record screen ---------- */
   #record{ background:#000; }
   #rawVideo{
-    position:absolute; top:0; left:0; width:1px; height:1px; opacity:0; pointer-events:none;
+    position:absolute; inset:0; width:100%; height:100%; opacity:0.01; pointer-events:none;
   }
   #camera{
-    position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+    position:absolute; inset:0; width:100%; height:100%; object-fit:contain; background:#000;
     transform: scaleX(-1); /* mirrored preview only -- the recorded pixels underneath are not flipped */
   }
   #scrim-top, #scrim-bottom{
@@ -170,7 +169,7 @@
 
   <!-- SETUP -->
   <section id="setup" class="screen active">
-    <div class="brand"><span class="dot"></span><h1>Prompter</h1><span>script + camera, one tap.</span></div>
+    <div class="brand"><span class="dot"></span><h1>Prompter</h1><span>script + camera, one tap</span></div>
 
     <label class="field-label" for="scriptInput">Script</label>
     <div class="row" id="scriptPickerRow" style="display:none;">
@@ -266,6 +265,7 @@
     canvasCtx: null,
     recordStream: null,
     manualDragging: false,
+    canvasTrack: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -444,23 +444,16 @@
     return "";
   }
 
-  // Sizes the recording canvas's actual pixel buffer to match the live
-  // viewport's aspect ratio exactly (capped for file size/performance), so
-  // whatever we draw into it and display full-screen needs no further
-  // CSS cropping or stretching -- what's on screen IS the recording.
-  function sizeCanvasToViewport(){
-    const MAX_LONG_SIDE = 1920;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    let cw = Math.round(window.innerWidth * dpr);
-    let ch = Math.round(window.innerHeight * dpr);
-    const longSide = Math.max(cw, ch);
-    if (longSide > MAX_LONG_SIDE) {
-      const scale = MAX_LONG_SIDE / longSide;
-      cw = Math.round(cw * scale);
-      ch = Math.round(ch * scale);
-    }
-    cameraEl.width = cw;
-    cameraEl.height = ch;
+  // Targets a fixed, standard video shape (16:9 landscape / 9:16 portrait)
+  // rather than window.innerWidth/innerHeight -- iOS Safari's toolbar eats
+  // into the reported viewport height in landscape, which was producing an
+  // artificially wide (~2.5:1, "cinematic") recording instead of a normal
+  // video ratio. The canvas is shown with object-fit:contain, so the full
+  // recorded frame is always exactly what's visible in the preview.
+  function sizeCanvasForOrientation(portrait){
+    const LONG_SIDE = 1920, SHORT_SIDE = 1080;
+    cameraEl.width = portrait ? SHORT_SIDE : LONG_SIDE;
+    cameraEl.height = portrait ? LONG_SIDE : SHORT_SIDE;
   }
 
   // Classic "object-fit: cover" math, computed by hand so we can bake the
@@ -482,8 +475,19 @@
     if (vw && vh) {
       const { sx, sy, sw, sh } = coverCrop(vw, vh, cameraEl.width, cameraEl.height);
       state.canvasCtx.drawImage(rawVideoEl, sx, sy, sw, sh, 0, 0, cameraEl.width, cameraEl.height);
+      // Push this frame into the recording explicitly rather than relying on
+      // captureStream's internal auto-capture timer, which is the other
+      // likely cause of the mid-recording freeze -- that timer has known
+      // reliability problems on iOS Safari after a stretch of seconds.
+      if (state.canvasTrack && state.canvasTrack.requestFrame) {
+        state.canvasTrack.requestFrame();
+      }
     }
-    requestAnimationFrame(drawFrame);
+    if (rawVideoEl.requestVideoFrameCallback) {
+      rawVideoEl.requestVideoFrameCallback(drawFrame);
+    } else {
+      requestAnimationFrame(drawFrame);
+    }
   }
 
   // ---------- Speech recognition ----------
@@ -684,16 +688,23 @@
       rawVideoEl.onloadedmetadata = () => resolve();
     });
 
-    // Size the canvas to the current viewport (and therefore the current
-    // orientation) right now, once, for this clip -- like a real camera,
-    // orientation locks for the duration of a recording rather than
-    // reflowing mid-clip.
-    sizeCanvasToViewport();
+    // Size the canvas to a fixed standard ratio for the current orientation,
+    // once, for this clip -- like a real camera, orientation locks for the
+    // duration of a recording rather than reflowing mid-clip.
+    sizeCanvasForOrientation(isPortraitNow());
     state.canvasCtx = cameraEl.getContext("2d");
     state.drawing = true;
-    requestAnimationFrame(drawFrame);
+    if (rawVideoEl.requestVideoFrameCallback) {
+      rawVideoEl.requestVideoFrameCallback(drawFrame);
+    } else {
+      requestAnimationFrame(drawFrame);
+    }
 
-    const canvasStream = cameraEl.captureStream(30);
+    // Manual capture mode (no fps argument): we push frames ourselves via
+    // requestFrame() inside drawFrame(), rather than relying on captureStream's
+    // own internal timer.
+    const canvasStream = cameraEl.captureStream();
+    state.canvasTrack = canvasStream.getVideoTracks()[0];
     const combinedStream = new MediaStream([
       ...canvasStream.getVideoTracks(),
       ...state.stream.getAudioTracks()
@@ -734,6 +745,7 @@
     }
     state.stream.getTracks().forEach(t => t.stop());
     if (state.recordStream) state.recordStream.getTracks().forEach(t => t.stop());
+    state.canvasTrack = null;
     rawVideoEl.srcObject = null;
   });
 
