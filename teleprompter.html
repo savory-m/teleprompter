@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -82,12 +83,9 @@
 
   /* ---------- Record screen ---------- */
   #record{ background:#000; }
-  #rawVideo{
-    position:absolute; inset:0; width:100%; height:100%; opacity:0.01; pointer-events:none;
-  }
   #camera{
     position:absolute; inset:0; width:100%; height:100%; object-fit:contain; background:#000;
-    transform: scaleX(-1); /* mirrored preview only -- the recorded pixels underneath are not flipped */
+    transform: scaleX(-1); /* mirrored preview only -- the recorded stream underneath is not flipped */
   }
   #scrim-top, #scrim-bottom{
     position:absolute; left:0; right:0; height:14%; pointer-events:none; z-index:2;
@@ -169,7 +167,7 @@
 
   <!-- SETUP -->
   <section id="setup" class="screen active">
-    <div class="brand"><span class="dot"></span><h1>Prompter</h1><span>script + camera, one tap</span></div>
+    <div class="brand"><span class="dot"></span><h1>Prompter</h1><span>script plus camera, one tap</span></div>
 
     <label class="field-label" for="scriptInput">Script</label>
     <div class="row" id="scriptPickerRow" style="display:none;">
@@ -213,8 +211,7 @@
 
   <!-- RECORD -->
   <section id="record" class="screen">
-    <video id="rawVideo" autoplay playsinline muted></video>
-    <canvas id="camera"></canvas>
+    <video id="camera" autoplay playsinline muted></video>
     <div id="scrim-top"></div>
     <div id="scrim-bottom"></div>
     <div id="readLine"></div>
@@ -261,11 +258,8 @@
     recordStartTime: 0,
     timerInterval: null,
     savedBlob: null,
-    drawing: false,
-    canvasCtx: null,
-    recordStream: null,
     manualDragging: false,
-    canvasTrack: null,
+    wakeLock: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -274,7 +268,6 @@
   const startBtn = $("startBtn");
   const promptText = $("promptText");
   const promptZone = $("promptZone");
-  const rawVideoEl = $("rawVideo");
   const cameraEl = $("camera");
   const stopBtn = $("stopBtn");
   const timerEl = $("timer");
@@ -423,6 +416,34 @@
     promptText.style.transform = "translateY(0px)";
   }
 
+  // ---------- Screen wake lock ----------
+  // If the screen dims/locks from inactivity mid-recording, canvas drawing
+  // and rendering stop entirely -- but iOS keeps the microphone recording
+  // in the background regardless, which produces exactly "video freezes,
+  // audio keeps going." Holding a wake lock for the duration of the
+  // recording prevents the screen from sleeping in the first place.
+  async function requestWakeLock(){
+    if (!("wakeLock" in navigator)) return;
+    try {
+      state.wakeLock = await navigator.wakeLock.request("screen");
+    } catch (err) {
+      state.wakeLock = null; // not fatal -- recording continues either way
+    }
+  }
+  function releaseWakeLock(){
+    if (state.wakeLock) {
+      state.wakeLock.release().catch(() => {});
+      state.wakeLock = null;
+    }
+  }
+  // The OS can silently release a wake lock (tab briefly backgrounded, etc).
+  // Re-acquire it if we come back while still recording.
+  document.addEventListener("visibilitychange", () => {
+    if (state.wantRecording && document.visibilityState === "visible" && !state.wakeLock) {
+      requestWakeLock();
+    }
+  });
+
   // ---------- Camera + mic ----------
   function isPortraitNow(){
     return window.matchMedia("(orientation: portrait)").matches;
@@ -431,8 +452,8 @@
   async function getStream(){
     const portrait = isPortraitNow();
     const video = portrait
-      ? { facingMode: "user", width: { ideal: 1080 }, height: { ideal: 1920 } }
-      : { facingMode: "user", width: { ideal: 1920 }, height: { ideal: 1080 } };
+      ? { facingMode: "user", width: { ideal: 1080 }, height: { ideal: 1920 }, aspectRatio: { ideal: 9 / 16 } }
+      : { facingMode: "user", width: { ideal: 1920 }, height: { ideal: 1080 }, aspectRatio: { ideal: 16 / 9 } };
     return navigator.mediaDevices.getUserMedia({ video, audio: true });
   }
 
@@ -442,52 +463,6 @@
       if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(o)) return o;
     }
     return "";
-  }
-
-  // Targets a fixed, standard video shape (16:9 landscape / 9:16 portrait)
-  // rather than window.innerWidth/innerHeight -- iOS Safari's toolbar eats
-  // into the reported viewport height in landscape, which was producing an
-  // artificially wide (~2.5:1, "cinematic") recording instead of a normal
-  // video ratio. The canvas is shown with object-fit:contain, so the full
-  // recorded frame is always exactly what's visible in the preview.
-  function sizeCanvasForOrientation(portrait){
-    const LONG_SIDE = 1920, SHORT_SIDE = 1080;
-    cameraEl.width = portrait ? SHORT_SIDE : LONG_SIDE;
-    cameraEl.height = portrait ? LONG_SIDE : SHORT_SIDE;
-  }
-
-  // Classic "object-fit: cover" math, computed by hand so we can bake the
-  // crop into the actual recorded pixels instead of leaving it as a purely
-  // visual CSS crop that the saved file wouldn't reflect.
-  function coverCrop(srcW, srcH, dstW, dstH){
-    const srcRatio = srcW / srcH, dstRatio = dstW / dstH;
-    if (srcRatio > dstRatio) {
-      const sh = srcH, sw = srcH * dstRatio;
-      return { sx: (srcW - sw) / 2, sy: 0, sw, sh };
-    }
-    const sw = srcW, sh = srcW / dstRatio;
-    return { sx: 0, sy: (srcH - sh) / 2, sw, sh };
-  }
-
-  function drawFrame(){
-    if (!state.drawing) return;
-    const vw = rawVideoEl.videoWidth, vh = rawVideoEl.videoHeight;
-    if (vw && vh) {
-      const { sx, sy, sw, sh } = coverCrop(vw, vh, cameraEl.width, cameraEl.height);
-      state.canvasCtx.drawImage(rawVideoEl, sx, sy, sw, sh, 0, 0, cameraEl.width, cameraEl.height);
-      // Push this frame into the recording explicitly rather than relying on
-      // captureStream's internal auto-capture timer, which is the other
-      // likely cause of the mid-recording freeze -- that timer has known
-      // reliability problems on iOS Safari after a stretch of seconds.
-      if (state.canvasTrack && state.canvasTrack.requestFrame) {
-        state.canvasTrack.requestFrame();
-      }
-    }
-    if (rawVideoEl.requestVideoFrameCallback) {
-      rawVideoEl.requestVideoFrameCallback(drawFrame);
-    } else {
-      requestAnimationFrame(drawFrame);
-    }
   }
 
   // ---------- Speech recognition ----------
@@ -682,38 +657,12 @@
       return;
     }
 
-    rawVideoEl.srcObject = state.stream;
-    await new Promise((resolve) => {
-      if (rawVideoEl.readyState >= 1 && rawVideoEl.videoWidth) { resolve(); return; }
-      rawVideoEl.onloadedmetadata = () => resolve();
-    });
-
-    // Size the canvas to a fixed standard ratio for the current orientation,
-    // once, for this clip -- like a real camera, orientation locks for the
-    // duration of a recording rather than reflowing mid-clip.
-    sizeCanvasForOrientation(isPortraitNow());
-    state.canvasCtx = cameraEl.getContext("2d");
-    state.drawing = true;
-    if (rawVideoEl.requestVideoFrameCallback) {
-      rawVideoEl.requestVideoFrameCallback(drawFrame);
-    } else {
-      requestAnimationFrame(drawFrame);
-    }
-
-    // Manual capture mode (no fps argument): we push frames ourselves via
-    // requestFrame() inside drawFrame(), rather than relying on captureStream's
-    // own internal timer.
-    const canvasStream = cameraEl.captureStream();
-    state.canvasTrack = canvasStream.getVideoTracks()[0];
-    const combinedStream = new MediaStream([
-      ...canvasStream.getVideoTracks(),
-      ...state.stream.getAudioTracks()
-    ]);
-    state.recordStream = combinedStream;
+    cameraEl.srcObject = state.stream;
+    await requestWakeLock();
 
     const mimeType = pickMimeType();
     state.chunks = [];
-    state.recorder = new MediaRecorder(combinedStream, mimeType ? { mimeType } : undefined);
+    state.recorder = new MediaRecorder(state.stream, mimeType ? { mimeType } : undefined);
     state.recorder.ondataavailable = (e) => { if (e.data && e.data.size) state.chunks.push(e.data); };
     state.recorder.onstop = onRecorderStop;
     state.recorder.start();
@@ -737,16 +686,14 @@
 
   stopBtn.addEventListener("click", () => {
     state.wantRecording = false;
-    state.drawing = false;
     clearInterval(state.timerInterval);
     stopRecognition();
     if (state.recorder && state.recorder.state !== "inactive") {
       state.recorder.stop();
     }
     state.stream.getTracks().forEach(t => t.stop());
-    if (state.recordStream) state.recordStream.getTracks().forEach(t => t.stop());
-    state.canvasTrack = null;
-    rawVideoEl.srcObject = null;
+    releaseWakeLock();
+    cameraEl.srcObject = null;
   });
 
   function onRecorderStop(){
