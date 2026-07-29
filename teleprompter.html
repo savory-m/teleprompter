@@ -167,7 +167,7 @@
 
   <!-- SETUP -->
   <section id="setup" class="screen active">
-    <div class="brand"><span class="dot"></span><h1>Prompter</h1><span>script plus camera, one tap</span></div>
+    <div class="brand"><span class="dot"></span><h1>Prompter</h1><span>script + camera, one tap</span></div>
 
     <label class="field-label" for="scriptInput">Script</label>
     <div class="row" id="scriptPickerRow" style="display:none;">
@@ -661,11 +661,16 @@
     await requestWakeLock();
 
     const mimeType = pickMimeType();
+    const recorderOptions = { videoBitsPerSecond: 4_000_000 };
+    if (mimeType) recorderOptions.mimeType = mimeType;
     state.chunks = [];
-    state.recorder = new MediaRecorder(state.stream, mimeType ? { mimeType } : undefined);
+    state.recorder = new MediaRecorder(state.stream, recorderOptions);
     state.recorder.ondataavailable = (e) => { if (e.data && e.data.size) state.chunks.push(e.data); };
     state.recorder.onstop = onRecorderStop;
-    state.recorder.start();
+    // An explicit timeslice forces periodic flushes instead of buffering the
+    // whole clip in memory until stop() -- unsliced long recordings are a
+    // known reliability weak point in Safari's MediaRecorder.
+    state.recorder.start(1000);
 
     state.wantRecording = true;
     state.recordStartTime = Date.now();
