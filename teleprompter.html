@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -169,7 +170,7 @@
 
   <!-- SETUP -->
   <section id="setup" class="screen active">
-    <div class="brand"><span class="dot"></span><h1>Prompter</h1><span>script + camera, one tap</span></div>
+    <div class="brand"><span class="dot"></span><h1>Prompter</h1><span>script + camera, one tap.</span></div>
 
     <label class="field-label" for="scriptInput">Script</label>
     <div class="row" id="scriptPickerRow" style="display:none;">
@@ -579,6 +580,15 @@
 
   // ---------- Scroll loop ----------
   const FALLBACK_PX_PER_SEC = 34; // baseline speed at 1.0x
+  const ANCHOR_FRACTION = 0.42;   // base focal point, as a fraction down the zone
+
+  // How far down the prompt zone the "active" line sits. Pulled up by
+  // roughly one line height (in current font terms) so more upcoming text
+  // is visible below it to read ahead.
+  function anchorOffset(zoneHeight){
+    const lineHeightPx = state.fontSize * 1.5;
+    return zoneHeight * ANCHOR_FRACTION - lineHeightPx;
+  }
 
   function scrollLoop(ts){
     if (!state.wantRecording) return;
@@ -592,7 +602,7 @@
 
       if (usingVoice) {
         const wordTop = state.words[state.lockedWordIndex].el.offsetTop;
-        const targetY = wordTop - zoneHeight * 0.42;
+        const targetY = wordTop - anchorOffset(zoneHeight);
         // Smooth toward the target word position so voice corrections don't jump abruptly.
         state.scrollY += (targetY - state.scrollY) * Math.min(1, dt * 6);
       } else {
@@ -615,7 +625,7 @@
 
   function wordIndexNearScroll(scrollY){
     const zoneHeight = promptZone.clientHeight;
-    const target = scrollY + zoneHeight * 0.42;
+    const target = scrollY + anchorOffset(zoneHeight);
     let closest = 0, closestDist = Infinity;
     for (let i = 0; i < state.words.length; i++) {
       const dist = Math.abs(state.words[i].el.offsetTop - target);
